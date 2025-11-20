@@ -14,7 +14,9 @@ fi
 # 2. Add files
 echo "Adding files to git..."
 git add .gitignore
-git add README.md CLAUDE.md INSTALL.md
+git add LICENSE
+git add README.md CLAUDE.md INSTALL.md CONTRIBUTING.md
+git add ARCHITECTURE.md CHANGELOG.md MODEL_DISTRIBUTION.md
 git add requirements.txt
 git add setup.sh
 git add detector/mailcam_detector_onnx.py
@@ -22,6 +24,8 @@ git add detector/mailcam.yml.example
 git add homeassistant_automations.yaml
 git add systemd/
 git add models/.gitkeep
+git add models/delivery.names
+git add .github/
 
 echo "✓ Files staged"
 

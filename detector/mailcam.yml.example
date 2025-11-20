@@ -1,8 +1,8 @@
 model:
-  # ONNX delivery model
-  path: /home/user/mailcam/models/delivery_task.onnx
-  # Labels file should match what you used with the legacy detector
-  labels: /home/user/models/delivery.names
+  # ONNX delivery model (relative to repository root)
+  path: ../models/delivery_task.onnx
+  # Labels file
+  labels: ../models/delivery.names
   # Inference parameters
   allow_labels: [amazon, dhl, fedex, ups, usps]
   imgsz: 640
@@ -10,7 +10,7 @@ model:
   area_min_frac: 0.0005
 
 mqtt:
-  host: YOUR_MQTT_HOST  # e.g., 10.0.0.2 or homeassistant.local
+  host: YOUR_MQTT_HOST  # e.g., homeassistant.local or 192.168.1.100
   port: 1883
   user: YOUR_MQTT_USER  # e.g., delivery
   password: YOUR_MQTT_PASSWORD  # Set your MQTT password here

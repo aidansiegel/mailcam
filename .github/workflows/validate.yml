@@ -1,0 +1,75 @@
+name: Validate
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Verify Python syntax
+      run: |
+        python -m py_compile detector/mailcam_detector_onnx.py
+        echo "✓ Python syntax valid"
+
+    - name: Check required files exist
+      run: |
+        test -f README.md || exit 1
+        test -f LICENSE || exit 1
+        test -f requirements.txt || exit 1
+        test -f detector/mailcam_detector_onnx.py || exit 1
+        test -f detector/mailcam.yml.example || exit 1
+        test -f models/.gitkeep || exit 1
+        test -f models/delivery.names || exit 1
+        test -f systemd/mailcam_detector.service.template || exit 1
+        test -f setup.sh || exit 1
+        echo "✓ All required files present"
+
+    - name: Validate YAML config example
+      run: |
+        python -c "import yaml; yaml.safe_load(open('detector/mailcam.yml.example'))"
+        echo "✓ Config example is valid YAML"
+
+    - name: Check for sensitive data
+      run: |
+        ! grep -r "10\.0\.0\." detector/mailcam.yml.example || exit 1
+        ! grep -r "password: mailcam" . --exclude-dir=.git || exit 1
+        echo "✓ No hardcoded credentials in example configs"
+
+    - name: Verify setup.sh is executable
+      run: |
+        test -x setup.sh || exit 1
+        echo "✓ setup.sh is executable"
+
+    - name: Check Python imports
+      run: |
+        python -c "
+        import sys
+        try:
+            import numpy
+            import PIL
+            import requests
+            import yaml
+            import paho.mqtt.client
+            import onnxruntime
+            print('✓ All required packages can be imported')
+        except ImportError as e:
+            print(f'✗ Import error: {e}')
+            sys.exit(1)
+        "
