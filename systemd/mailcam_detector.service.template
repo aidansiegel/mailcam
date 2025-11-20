@@ -1,0 +1,41 @@
+[Unit]
+Description=Mailcam Detector (ONNX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/mailcam/detector
+
+# Python settings
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONWARNINGS=ignore::DeprecationWarning
+
+# ONNX Runtime settings
+Environment=ORT_NUM_THREADS=1
+
+# Optional: override poll interval (default: 2.5s from YAML)
+Environment=MAILCAM_POLL=2.5
+
+# Execute the ONNX-based detector daemon
+ExecStart=/path/to/detectenv/bin/python /path/to/mailcam/detector/mailcam_detector_onnx.py
+
+# Restart policy
+Restart=on-failure
+RestartSec=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+CPUAccounting=yes
+CPUQuota=70%
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target

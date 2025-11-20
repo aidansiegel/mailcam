@@ -1,0 +1,42 @@
+mqtt:
+  host: 10.0.0.2
+  port: 1883
+  username: delivery
+  password: mailcam
+  base_topic: mailcam
+  client_id: mailcam-detector
+
+model:
+  path: /home/user/mailcam/models/delivery_task.onnx
+  task: detect
+  sidecar_yaml: /home/user/mailcam/models/delivery.yaml
+  allow_labels: [amazon, dhl, fedex, ups, usps]
+  conf_min: 0.30
+  iou: 0.50
+  imgsz: 640
+  max_det: 20
+
+pipeline:
+  window_seconds: 45
+  require_motion: true
+  motion_topic: homeassistant/binary_sensor/outside_motion_sensor_occupancy/state  # adjust if yours differs
+
+cameras:
+  - name: wide
+    source: camera.identifier_camera
+  - name: mailbox
+    source: camera.mailbox
+
+# --- frame source ---
+source:
+  kind: image            # image | rtsp | http | file
+  path: /home/user/stream_probe.jpeg
+  poll_sec: 2.0          # cadence target
+  timeout_sec: 5.0
+
+# --- frame source ---
+source:
+  kind: rtsp
+  url: rtsp://10.0.0.3:8554/yourstream   # or http mjpeg url
+  poll_sec: 2.0
+  timeout_sec: 5.0

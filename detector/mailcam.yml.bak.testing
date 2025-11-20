@@ -1,0 +1,26 @@
+model:
+  # ONNX delivery model
+  path: /home/user/mailcam/models/delivery_task.onnx
+  # Labels file should match what you used with the legacy detector
+  labels: /home/user/models/delivery.names
+  # Inference parameters
+  allow_labels: [amazon, dhl, fedex, ups, usps]
+  imgsz: 640
+  conf_min: 0.30
+  area_min_frac: 0.0005
+
+mqtt:
+  host: 10.0.0.2
+  port: 1883
+  user: delivery
+  password: mailcam
+  state_topic: mailcam/state
+  detail_topic: mailcam/details
+
+source:
+  # We are reading a single JPEG snapshot periodically, not an RTSP stream
+  kind: image
+  url: "http://10.0.0.2:8123/local/mailcam/latest.jpg"
+  # Matches your MAILCAM_PERIOD≈2.5s; adjust if needed
+  poll_sec: 2.5
+  timeout_sec: 5.0

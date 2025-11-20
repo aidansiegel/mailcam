@@ -1,0 +1,99 @@
+# /etc/systemd/system/mailcam_restream.service
+[Unit]
+Description=Mailcam restream + detector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=user
+WorkingDirectory=/home/user/mailcam
+# Use the venv explicitly:
+ExecStart=/home/user/restreamenv/bin/python /home/user/mailcam/restream.py
+Restart=always
+RestartSec=2
+
+# Make env visible for diagnostics
+Environment=MAILCAM_SOURCE=http://10.0.0.2:8123/local/mailcam/latest.jpg
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/mailcam_restream.service.d/cooldown.conf
+[Service]
+Environment=OMP_NUM_THREADS=1
+Environment=ORT_NUM_THREADS=1
+Environment=MAILCAM_PERIOD=1.8
+CPUQuota=70%
+
+# /etc/systemd/system/mailcam_restream.service.d/mqtt-debug.conf
+[Service]
+Environment=MAILCAM_NOTIFY_COOLDOWN=10
+Environment=MAILCAM_MQTT_DEBUG=1
+
+# /etc/systemd/system/mailcam_restream.service.d/mqtt.conf
+[Service]
+Environment=MAILCAM_MQTT_HOST=10.0.0.2
+Environment=MAILCAM_MQTT_USER=delivery
+Environment=MAILCAM_MQTT_PASS=gbk-29-bbx!
+Environment=MAILCAM_MQTT_TOPIC=home/mailcam/delivery
+Environment=MAILCAM_NOTIFY_COOLDOWN=90
+
+# /etc/systemd/system/mailcam_restream.service.d/mqtt2.conf
+[Service]
+Environment=MAILCAM_MQTT_HOST=10.0.0.2
+Environment=MAILCAM_MQTT_USER=delivery
+Environment=MAILCAM_MQTT_PASS=gbk-29-bbx!
+Environment=MAILCAM_TOPIC_STATE=home/mailcam/delivery/state
+Environment=MAILCAM_TOPIC_EVENT=home/mailcam/delivery/event
+Environment=MAILCAM_NOTIFY_COOLDOWN=90
+Environment=MAILCAM_RESET_HOUR=3
+
+# /etc/systemd/system/mailcam_restream.service.d/nococo.conf
+[Service]
+# Make COCO effectively inert
+Environment=MAILCAM_CONF_COCO=0.99
+Environment=MAILCAM_MINA=1.0
+Environment=MAILCAM_MINHIT=999
+
+# /etc/systemd/system/mailcam_restream.service.d/override.conf
+[Service]
+# Models
+Environment=MAILCAM_MODEL_COCO=/home/user/models/yolov8n.onnx
+Environment=MAILCAM_MODEL_DELIVERY=/home/user/models/delivery.onnx
+Environment=MAILCAM_LABELS_DELIVERY=/home/user/models/delivery.names
+
+# Very permissive thresholds to prove detections
+Environment=MAILCAM_CONF_COCO=0.10
+Environment=MAILCAM_CONF_DEL=0.20
+Environment=MAILCAM_MINA=0.00008
+Environment=MAILCAM_TIOU=0.50
+Environment=MAILCAM_MINHIT=1
+Environment=MAILCAM_TAGE=2.0
+
+# /etc/systemd/system/mailcam_restream.service.d/period.conf
+[Service]
+Environment=MAILCAM_PERIOD=2.2
+
+# /etc/systemd/system/mailcam_restream.service.d/sticky.conf
+[Service]
+# require more consecutive frames before "enter"
+Environment=MAILCAM_MINHIT=6
+# keep "present" for this many seconds without hits before dropping
+Environment=MAILCAM_TAGE=3.5
+# NMS and min area can stay as you had them or omit here
+
+# /etc/systemd/system/mailcam_restream.service.d/threads.conf
+[Service]
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+Environment=OMP_WAIT_POLICY=PASSIVE
+
+# /etc/systemd/system/mailcam_restream.service.d/today.conf
+[Service]
+# Only add a new line for the same carrier if the last line for that
+# carrier is at least this many seconds old.
+Environment=MAILCAM_TODAY_MIN_GAP=60
+# Draw at most this many two-line entries (i.e., limit list height)
+Environment=MAILCAM_TODAY_MAX=12

@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+import os, logging
+# ---- Mailcam: enforced runtime env (injected) ----
+
+
+# --- injected vehicle delivery gate ---
+VEHICLE_LABELS = {"amazon","dhl","fedex","ups","usps"}
+
+def _mailcam_has_vehicle_in_evidence(evbuf):
+    try:
+        # evidence may be like [[ts, "label"], ...] or [{"label":...}, ...]
+        for e in evbuf or []:
+            if isinstance(e, (list, tuple)):
+                if len(e) >= 2 and str(e[1]) in VEHICLE_LABELS:
+                    return True
+            elif isinstance(e, dict):
+                if str(e.get("label","")) in VEHICLE_LABELS:
+                    return True
+    except Exception:
+        pass
+    return False
+
+# Wrap the low-level MQTT publish to state topic, if present
+def _mailcam_wrap_publish(fn):
+    def _wrapped(topic, payload, *args, **kwargs):
+        try:
+            if isinstance(topic, str) and topic.endswith("/state") and str(payload) == "Delivered":
+                # try to locate an evidence buffer in globals (common names)
+                ev = None
+                for name in ("evidence","evidence_buffer","EVIDENCE","recent_evidence","evidence_buf"):
+                    if name in globals():
+                        ev = globals()[name]
+                        break
+                # if no vehicle found, downgrade to "Delivery in progress"
+                if not _mailcam_has_vehicle_in_evidence(ev):
+                    payload = "Delivery in progress"
+        except Exception:
+            pass
+        return fn(topic, payload, *args, **kwargs)
+    return _wrapped
+# --- end injection ---
+from ultralytics import YOLO
+import onnx
+
+def load_delivery_model(model_path:str, sidecar_yaml:str):
+    # Force Ultralytics to treat this as detect and give it a data file
+    try:
+        m = YOLO(model_path, task='detect', verbose=False)
+        # Newer Ultralytics: prefer setting overrides on predictor/model
+        try:
+            m.overrides = getattr(m, "overrides", {}) or {}
+            m.overrides.update({"task": "detect", "data": sidecar_yaml})
+        except Exception:
+            pass
+        # Hard set names from ONNX metadata if present
+        try:
+            om = onnx.load(model_path)
+            meta = {p.key:p.value for p in om.metadata_props}
+            if "names" in meta:
+                # eval safe-ish for the common {0:'amazon',...} format:
+                m.names = eval(meta["names"])
+        except Exception:
+            pass
+        return m
+    except KeyError:
+        # Some Ultralytics builds expect metadata['task']; retry via low-level override
+        m = YOLO(model_path, verbose=False)
+        try:
+            # Older API shims
+            setattr(m, "names", getattr(m, "names", {}))
+        except Exception:
+            pass
+        return m
+
+
+# ---- Mailcam log level toggle ----
+import os
+MAILCAM_DEBUG = os.environ.get("MAILCAM_DEBUG","0") in ("1","true","True","yes","on")
+def dbg(*a, **k):
+    if MAILCAM_DEBUG:
+        dbg(*a, **k)
+# ----------------------------------
+# Prevent Ultralytics from trying to auto-install packages at runtime.
+os.environ.setdefault("ULTRALYTICS_SKIP_AUTO_UPDATE", "1")
+# Reduce Ultralytics verbosity
+os.environ.setdefault("ULTRALYTICS_LOG_LEVEL", "WARNING")
+# Hide DeprecationWarning spam from paho/other libs
+os.environ.setdefault("PYTHONWARNINGS", "ignore::DeprecationWarning")
+# Configure python logging for downstream modules
+logging.getLogger("ultralytics").setLevel(logging.WARNING)
+logging.getLogger("ultralytics.nn").setLevel(logging.WARNING)
+logging.getLogger("ultralytics.engine").setLevel(logging.WARNING)
+# Provide an explicit model path env that the service can override
+os.environ.setdefault("MAILCAM_MODEL_PATH", "/home/user/mailcam/models/delivery.onnx")
+# -------------------------------------------------
+import os, time, json, math, threading, queue, datetime as dt
+import cv2, numpy as np, paho.mqtt.client as mqtt, yaml
+
+CFG = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "mailcam.yml")))
+
+# --- Mailcam delivery-only settings (injected) ---
+CFG = CFG if 'CFG' in globals() else {}
+MCONF = CFG.get('model', {})
+MODEL_PATH = os.getenv('MAILCAM_MODEL_PATH', MCONF.get('path','/home/user/mailcam/models/delivery.onnx'))
+SIDECAR = MCONF.get('sidecar_yaml','/home/user/mailcam/models/delivery.yaml')
+CONF_MIN = float(MCONF.get('conf_min', 0.45))
+IOU = float(MCONF.get('iou', 0.50))
+ALLOW_LABELS = set(MCONF.get('allow_labels', ['amazon','dhl','fedex','ups','usps']))
+
+# Instantiate model once
+yolo_model = load_delivery_model(MODEL_PATH, SIDECAR) if USE_YOLO else None
+MQTT = CFG["mqtt"]; BASE_TOPIC = MQTT.get("base_topic","mailcam")
+HA_MOTION = CFG["home_assistant"]["outside_motion_entity"]
+
+USE_YOLO = bool(CFG["detection"].get("use_yolo", True))
+CONF_T = float(CFG["detection"]["conf_threshold"])
+IOU_T = float(CFG["detection"]["iou_threshold"])
+MIN_AREA = int(CFG["detection"]["min_box_area_px"])
+TRACK_GAP = float(CFG["detection"]["track_max_gap_s"])
+VEH_STOP_S = float(CFG["detection"]["vehicle_stop_seconds"])
+APPROACH_S = float(CFG["detection"]["approach_person_seconds"])
+WINDOW_S = float(CFG["logic"]["window_s"])
+COOL_DOWN_S = float(CFG["logic"]["cool_down_s"])
+MIN_UNKNOWN_S = float(CFG["logic"]["min_unknown_seconds"])
+
+DBG_SAVE = bool(CFG["debug"]["save_frames"])
+DBG_DIR = CFG["debug"]["save_dir"]; os.makedirs(DBG_DIR, exist_ok=True)
+DRAW = bool(CFG["debug"]["draw_overlays"])
+
+client = mqtt.Client()
+if MQTT.get("username",""):
+    client.username_pw_set(MQTT["username"], MQTT.get("password",""))
+client.connect(MQTT["host"], int(MQTT["port"]), 60)
+client.loop_start()
+
+MOTION = {"value": False, "ts": 0.0}
+def on_msg(_c,_u,msg):
+    try:
+        s = msg.payload.decode("utf-8")
+        if s.startswith("{"): s = json.loads(s).get("state","off")
+        MOTION["value"] = s.lower() in ("on","true","1"); MOTION["ts"]=time.time()
+    except Exception: pass
+client.on_message = on_msg
+client.subscribe(f"homeassistant/{HA_MOTION}/state")
+
+def publish_state(state, details):
+    client.publish(f"{BASE_TOPIC}/state", state, retain=True)
+    client.publish(f"{BASE_TOPIC}/details", json.dumps(details, default=str), retain=True)
+
+yolo_model=None; class_names=[]
+if USE_YOLO:
+    try:
+        from ultralytics import YOLO
+        yolo_model = YOLO(os.environ.get("MAILCAM_MODEL_PATH", "/home/user/mailcam/models/delivery.onnx", task="detect"), task="detect"); class_names = yolo_model.names
+    except Exception as e:
+        dbg(f"[WARN] YOLO disabled: {e}"); USE_YOLO=False
+
+def poly_mask(shape, poly=None):
+    h,w = shape[:2]
+    if not poly: return np.full((h,w),255,np.uint8)
+    pts = np.array([(int(x*w),int(y*h)) for x,y in poly], np.int32)
+    m = np.zeros((h,w),np.uint8); cv2.fillPoly(m,[pts],255); return m
+
+class Stream(threading.Thread):
+    def __init__(self,name,url,roi):
+        super().__init__(daemon=True); self.name=name; self.url=url; self.roi=roi
+        self.mask=None; self.q=queue.Queue(1)
+    def run(self):
+        cap=cv2.VideoCapture(self.url)
+        if not cap.isOpened():
+            dbg(f"[ERR] open {self.name} @ {self.url}"); return
+        ok,fr=cap.read()
+        if not ok:
+            dbg(f"[ERR] no frame {self.name}"); return
+        self.mask=poly_mask(fr.shape,self.roi)
+        while True:
+            ok,fr=cap.read()
+            if ok:
+                ts=time.time()
+                if self.q.full():
+                    try:self.q.get_nowait()
+                    except queue.Empty:pass
+                self.q.put((ts,fr))
+
+streams=[]
+for s in CFG["streams"]:
+    t=Stream(s["name"], s["url"], s.get("roi_polygon"))
+    t.start(); streams.append(t)
+
+def iou(a,b):
+    ax1,ay1,ax2,ay2=a; bx1,by1,bx2,by2=b
+    xi1,yi1=max(ax1,bx1),max(ay1,by1); xi2,yi2=min(ax2,bx2),min(ay2,by2)
+    inter=max(0,xi2-xi1)*max(0,yi2-yi1)
+    if inter==0: return 0.0
+    aa=(ax2-ax1)*(ay2-ay1); bb=(bx2-bx1)*(by2-by1)
+    return inter/float(aa+bb-inter)
+
+def draw(fr, box, label, color=(255,255,255)):
+    x1,y1,x2,y2=map(int,box)
+    cv2.rectangle(fr,(x1,y1),(x2,y2),color,2)
+    cv2.putText(fr,label,(x1,max(10,y1-6)),cv2.FONT_HERSHEY_SIMPLEX,0.5,color,1)
+
+tracks={}; next_id=1; evidence=[]; last_decision=0.0
+def add_ev(t): evidence.append((time.time(),t))
+def prune_ev():
+    cut=time.time()-WINDOW_S
+    while evidence and evidence[0][0]<cut: evidence.pop(0)
+
+
+def decide():
+    """State machine:
+    - Delivered if we saw a person recently, AND (a vehicle stopped OR sustained person presence).
+    - Delivery in progress if a vehicle stopped but no person yet.
+    - Unknown if nothing meaningful for a while.
+    Motion (if present on MQTT) only boosts confidence; it is not required.
+    """
+    global last_decision
+    prune_ev(); now=time.time()
+    if now-last_decision<COOL_DOWN_S:
+        return
+
+    # Evidence summaries
+    tags=[t for _,t in evidence]
+    has_person=("person" in tags)
+    has_vehicle=("vehicle" in tags)
+    recent = (len(evidence) > 0 and now - evidence[-1][0] < WINDOW_S)
+
+    # Count person observations in the current window
+    person_count = sum(1 for _,t in evidence if t=="person")
+
+    # Heuristics
+    person_sustained = person_count >= 3
+    delivered = has_person and (has_vehicle or person_sustained)
+
+    details={"evidence":evidence[-15:], "motion":MOTION, "window":WINDOW_S}
+
+    if delivered:
+        publish_state("Delivered", details); last_decision=now; return
+
+    if has_vehicle and not has_person and recent:
+        publish_state("Delivery in progress", details); last_decision=now; return
+
+    # If no recent evidence, fall back to Unknown
+    if not recent:
+        publish_state("Unknown", details); last_decision=now; return
+
+
+def process(name,ts,fr,mask):
+    global next_id
+    masked=cv2.bitwise_and(fr,fr,mask=mask); dets=[]
+    if USE_YOLO and yolo_model:
+        r=yolo_model.predict(masked, conf=CONF_T, iou=IOU_T, verbose=False)[0]
+        for b,c,conf in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls.cpu().numpy(), r.boxes.conf.cpu().numpy()):
+            cls=class_names[int(c)]
+            if cls not in {"person","car","truck","bus"}: continue
+            x1,y1,x2,y2=map(int,b); area=(x2-x1)*(y2-y1)
+            if area<MIN_AREA: continue
+            dets.append((cls,(x1,y1,x2,y2)))
+    else:
+        g=cv2.cvtColor(masked,cv2.COLOR_BGR2GRAY); g=cv2.GaussianBlur(g,(7,7),0)
+        process.prev=getattr(process,"prev",g); diff=cv2.absdiff(process.prev,g); process.prev=g
+        _,th=cv2.threshold(diff,25,255,cv2.THRESH_BINARY)
+        cnts,_=cv2.findContours(th,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        for c in cnts:
+            if cv2.contourArea(c)<MIN_AREA: continue
+            x,y,wc,hc=cv2.boundingRect(c)
+            dets.append(("person",(x,y,x+wc,y+hc)))
+
+    # IoU tracking + vehicle stop
+    for cls,box in dets:
+        # match
+        best_k=None; best_i=0.0
+        for k,tr in tracks.items():
+            if tr["cls"]!=cls: continue
+            i=iou(tr["box"], box)
+            if i>best_i: best_i=i; best_k=k
+        if best_k and (ts-tracks[best_k]["ts"])<TRACK_GAP and best_i>0.3:
+            tr=tracks[best_k]; tr["box"]=box; tr["ts"]=ts; k=best_k
+        else:
+            k=(name,next_id); tracks[k]={"cls":cls,"box":box,"ts":ts,"stopped":0.0}; next_id+=1
+
+        color=(255,255,255); label=cls
+        if cls in ("car","truck","bus"):
+            tr=tracks[k]
+            (x1,y1,x2,y2)=box; cx=(x1+x2)/2; cy=(y1+y2)/2
+            (ox1,oy1,ox2,oy2)=tr["box"]; ocx=(ox1+ox2)/2; ocy=(oy1+oy2)/2
+            dist=math.hypot(cx-ocx, cy-ocy)
+            if dist<4:
+                if tr["stopped"]==0.0: tr["stopped"]=ts
+            else:
+                tr["stopped"]=0.0
+            if tr["stopped"] and (ts-tr["stopped"])>=VEH_STOP_S:
+                add_ev("vehicle"); label+="(stopped)"; color=(0,255,255)
+        if cls=="person":
+            add_ev("person"); color=(0,255,0)
+        if DRAW: draw(fr, box, label, color)
+
+    if MOTION["value"] and (time.time()-MOTION["ts"])<=APPROACH_S:
+        add_ev("motion")
+
+    for k in list(tracks.keys()):
+        if time.time()-tracks[k]["ts"]>max(WINDOW_S,2*TRACK_GAP):
+            tracks.pop(k, None)
+
+    decide()
+
+    if DBG_SAVE and int(ts)%3==0:
+        stamp=dt.datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
+        out=fr.copy()
+        if DRAW: cv2.putText(out,f"{name} {stamp}",(10,20),cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,255),1)
+        cv2.imwrite(os.path.join(DBG_DIR, f"{stamp}_{name}.jpg"), out)
+
+def main():
+    publish_state("Not delivered", {"boot": dt.datetime.now().isoformat()})
+    while True:
+        for s in streams:
+            try: ts, fr = s.q.get(timeout=0.05)
+            except queue.Empty: continue
+            process(s.name, ts, fr, s.mask)
+
+if __name__=="__main__":
+    main()
+
+
+# Map class id to a safe label; tolerate missing/partial names.
+def label_for_class(model, cls_id):
+    try:
+        nm = getattr(model, "names", None)
+        if isinstance(nm, dict):
+            return nm.get(int(cls_id), str(int(cls_id)))
+        if isinstance(nm, (list, tuple)):
+            i = int(cls_id)
+            return nm[i] if 0 <= i < len(nm) else str(i)
+    except Exception:
+        pass
+    return str(int(cls_id))
+
+
+
+# ---- injected: delivery gating ----
+VEHICLE_LABELS = set(["amazon","dhl","fedex","ups","usps"])
+PERSON_LABELS  = set(["person"])
+
+def has_vehicle(hit_list):
+    try:
+        return any(h.get("label") in VEHICLE_LABELS for h in (hit_list or []))
+    except Exception:
+        return False
+
+def has_person(hit_list):
+    try:
+        return any(h.get("label") in PERSON_LABELS for h in (hit_list or []))
+    except Exception:
+        return False
+# -----------------------------------
+def detect_objects_bounded(frame_bgr):
+    if not yolo_model:
+        return []
+    # Ultralytics accepts numpy image arrays directly
+    try:
+        res = yolo_model.predict(source=frame_bgr, imgsz=int(MCONF.get('imgsz',1280)),
+                                 conf=CONF_MIN, iou=IOU, max_det=int(MCONF.get('max_det',20)),
+                                 verbose=False)
+    except TypeError:
+        res = yolo_model(frame_bgr)
+    r = res[0] if isinstance(res,(list,tuple)) and len(res)>0 else res
+    out = []
+    boxes = getattr(r, "boxes", None)
+    if boxes is not None:
+        try:
+            # xyxy, conf, cls
+            for i in range(len(boxes)):
+                box = boxes[i]
+                cls = int(box.cls[0] if hasattr(box.cls,'__len__') else box.cls)
+                conf = float(box.conf[0] if hasattr(box.conf,'__len__') else box.conf)
+                label = (yolo_model.names.get(cls, str(cls)) if hasattr(yolo_model,'names') and isinstance(yolo_model.names, dict)
+                         else str(cls))
+                if conf >= CONF_MIN and label in ALLOW_LABELS:
+                    xyxy = box.xyxy[0].tolist() if hasattr(box.xyxy,'__len__') else list(map(float, box.xyxy))
+                    out.append({"label": label, "conf": conf, "xyxy": xyxy})
+        except Exception:
+            pass
+    return out
+
+def require_motion_active(CFG, motion_state):
+    try:
+        return (bool(CFG.get("pipeline",{}).get("require_motion", False)) == False) or bool(motion_state)
+    except Exception:
+        return True
+
+# paho-mqtt adapter
+try:
+    _MAILCAM_PAHO_CLIENT_CLASS = mqtt.Client  # type: ignore
+    _mailcam_orig_publish = _MAILCAM_PAHO_CLIENT_CLASS.publish
+    def _mailcam_client_publish(self, topic, payload=None, *a, **kw):
+        # emulate the wrapper logic
+        try:
+            if isinstance(topic, str) and topic.endswith("/state") and str(payload) == "Delivered":
+                ev = None
+                for name in ("evidence","evidence_buffer","EVIDENCE","recent_evidence","evidence_buf"):
+                    if name in globals():
+                        ev = globals()[name]
+                        break
+                if not _mailcam_has_vehicle_in_evidence(ev):
+                    payload = "Delivery in progress"
+        except Exception:
+            pass
+        return _mailcam_orig_publish(self, topic, payload, *a, **kw)
+    _MAILCAM_PAHO_CLIENT_CLASS.publish = _mailcam_client_publish
+except Exception:
+    pass

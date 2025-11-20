@@ -1,0 +1,12 @@
+# Mailcam Delivery Detector Requirements
+numpy==1.26.4
+Pillow>=10.0.0
+requests>=2.31.0
+pyyaml>=6.0
+paho-mqtt>=1.6.1
+onnxruntime==1.17.3
+
+# Optional: for restream service (MJPEG streaming - currently disabled)
+# opencv-python-headless==4.10.0.84
+# fastapi>=0.104.0
+# uvicorn>=0.24.0

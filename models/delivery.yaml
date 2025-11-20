@@ -1,0 +1,14 @@
+task: detect
+names:
+  0: amazon
+  1: dhl
+  2: fedex
+  3: homedepot
+  4: ikea
+  5: lowes
+  6: target
+  7: ups
+  8: usps
+  9: walmart
+  10: garbage
+  11: uhaul

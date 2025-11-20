@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+detectenv/
+restreamenv/
+
+# Config with credentials
+detector/mailcam.yml
+mailcam.yml
+
+# Models (too large, download separately)
+models/*.onnx
+models/*.pt
+
+# Backup files
+*.bak
+*.backup
+*.old
+*~
+
+# Debug outputs
+debug_*.jpg
+*.jpeg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.setup-info

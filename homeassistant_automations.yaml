@@ -1,0 +1,111 @@
+# Mailcam Home Assistant Automations
+# Add these to your Home Assistant configuration.yaml or automations.yaml
+
+# ========================================
+# Individual Carrier Notifications
+# ========================================
+
+- id: mailcam_notify_amazon
+  alias: "Mailcam: Notify Amazon Delivery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.mailcam_amazon_today
+      from: "off"
+      to: "on"
+  action:
+    - service: notify.notify
+      data:
+        title: "📦 Amazon Delivery Detected"
+        message: "Amazon delivery vehicle detected at {{ now().strftime('%I:%M %p') }}"
+
+- id: mailcam_notify_fedex
+  alias: "Mailcam: Notify FedEx Delivery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.mailcam_fedex_today
+      from: "off"
+      to: "on"
+  action:
+    - service: notify.notify
+      data:
+        title: "📦 FedEx Delivery Detected"
+        message: "FedEx delivery vehicle detected at {{ now().strftime('%I:%M %p') }}"
+
+- id: mailcam_notify_ups
+  alias: "Mailcam: Notify UPS Delivery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.mailcam_ups_today
+      from: "off"
+      to: "on"
+  action:
+    - service: notify.notify
+      data:
+        title: "📦 UPS Delivery Detected"
+        message: "UPS delivery vehicle detected at {{ now().strftime('%I:%M %p') }}"
+
+- id: mailcam_notify_usps
+  alias: "Mailcam: Notify USPS Delivery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.mailcam_usps_today
+      from: "off"
+      to: "on"
+  action:
+    - service: notify.notify
+      data:
+        title: "📬 USPS Delivery Detected"
+        message: "USPS delivery vehicle detected at {{ now().strftime('%I:%M %p') }}"
+
+- id: mailcam_notify_dhl
+  alias: "Mailcam: Notify DHL Delivery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.mailcam_dhl_today
+      from: "off"
+      to: "on"
+  action:
+    - service: notify.notify
+      data:
+        title: "📦 DHL Delivery Detected"
+        message: "DHL delivery vehicle detected at {{ now().strftime('%I:%M %p') }}"
+
+# ========================================
+# Daily Summary Report at 7:30 PM
+# ========================================
+
+- id: mailcam_daily_report
+  alias: "Mailcam: Daily Delivery Report"
+  trigger:
+    - platform: time
+      at: "19:30:00"  # 7:30 PM
+  action:
+    - service: notify.notify
+      data:
+        title: "📋 Daily Delivery Report"
+        message: >
+          {% set summary = state_attr('sensor.mailcam_daily_summary', 'carriers') %}
+          {% set carriers = namespace(list=[]) %}
+          {% if summary %}
+            {% if summary.amazon.detected %}
+              {% set carriers.list = carriers.list + ['Amazon at ' ~ summary.amazon.time] %}
+            {% endif %}
+            {% if summary.fedex.detected %}
+              {% set carriers.list = carriers.list + ['FedEx at ' ~ summary.fedex.time] %}
+            {% endif %}
+            {% if summary.ups.detected %}
+              {% set carriers.list = carriers.list + ['UPS at ' ~ summary.ups.time] %}
+            {% endif %}
+            {% if summary.usps.detected %}
+              {% set carriers.list = carriers.list + ['USPS at ' ~ summary.usps.time] %}
+            {% endif %}
+            {% if summary.dhl.detected %}
+              {% set carriers.list = carriers.list + ['DHL at ' ~ summary.dhl.time] %}
+            {% endif %}
+          {% endif %}
+          {% if carriers.list | length > 0 %}
+          Today's deliveries:
+          {{ carriers.list | join('\n') }}
+          {% else %}
+          No deliveries detected today.
+          {% endif %}
